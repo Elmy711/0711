@@ -20,7 +20,7 @@ node -v
 # Output: v16.x.x atau lebih tinggi
 
 # 2. Download / clone script
-curl -o 0711.js https://raw.githubusercontent.com/your-repo/0711/main/0711.js
+curl -o 0711.js https://raw.githubusercontent.com/Elmy0711/0711/main/0711.js
 
 # 3. (Opsional) Install dependencies untuk dashboard
 npm install express cors
