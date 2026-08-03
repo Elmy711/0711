@@ -70,16 +70,55 @@ Parameter Deskripsi Default Contoh
 
 ---
 
-🔥 4. MODE SERANGAN
+🎯 Mode Serangan pada 0711.js 
 
-Mode Deskripsi Cocok Untuk
-normal HTTP/2 flood standar dengan header acak Uji ketahanan umum
-rapid_reset HTTP/2 Rapid Reset (CVE‑2023‑44487) – kirim RST_STREAM segera Bypass rate‑limit, CPU exhaustion
-slowloris Tahan koneksi dengan header tidak selesai Server dengan koneksi terbatas
-rudy Slow POST dengan payload besar (1‑3 MB) dikirim perlahan Server dengan buffer terbatas
-mixed Kombinasi acak dari semua mode (belum diimplementasikan sepenuhnya) Serangan adaptif
+1. normal – HTTP/2 Flood Standar
+
+· Cara kerja: Mengirimkan request HTTP/2 dengan header acak (User‑Agent, IP spoofing, referer, dll.) dan melakukan rotasi payload. Koneksi dibuat ulang setiap request untuk menghindari deteksi.
+· Kelebihan: Stabil, throughput tinggi, cocok untuk uji ketahanan dasar.
+· Kekurangan: Mudah dideteksi oleh WAF modern karena pola request yang berulang.
+· Cocok untuk: Uji ketahanan umum, pengukuran kapasitas server, atau serangan awal untuk mengukur respons.
+
+2. rapid_reset – HTTP/2 Rapid Reset (CVE‑2023‑44487)
+
+· Cara kerja: Memanfaatkan celah keamanan HTTP/2 dengan mengirim request lalu segera mengirim RST_STREAM (reset stream) sehingga server harus memproses pembatalan stream secara berulang. Ini menghabiskan CPU server.
+· Kelebihan: Sangat efektif untuk menghabiskan resource CPU, sulit ditangani oleh WAF biasa, dan tidak memerlukan banyak bandwidth.
+· Kekurangan: Hanya bekerja pada server yang mendukung HTTP/2 dan rentan terhadap celah ini (kebanyakan server modern sudah di‑patch, tapi masih banyak yang belum).
+· Cocok untuk: Bypass rate‑limit, CPU exhaustion, menekan server dengan resource terbatas.
+
+3. slowloris – Tahan Koneksi dengan Header Tidak Selesai
+
+· Cara kerja: Membuka koneksi TCP ke server, mengirim sebagian header HTTP (misal GET / ...\r\nHost: ...), lalu tidak mengirimkan \r\n\r\n penutup. Koneksi tetap terbuka dan server harus menunggu hingga timeout. Dengan banyak koneksi setengah jadi, server kehabisan slot koneksi.
+· Kelebihan: Menggunakan sedikit bandwidth, sulit dideteksi sebagai serangan biasa, efektif pada server dengan batas koneksi rendah.
+· Kekurangan: Memerlukan banyak koneksi simultan, lambat dalam menghasilkan efek, tidak efektif pada server dengan load balancer atau timeout pendek.
+· Cocok untuk: Server dengan koneksi terbatas (misal Apache dengan MaxClients kecil), atau sebagai serangan pengganggu.
+
+4. rudy – Slow POST dengan Payload Besar
+
+· Cara kerja: Mengirim request POST dengan header Content-Length besar (1‑3 MB), lalu mengirim data secara perlahan (chunk per chunk dengan jeda 100‑300 ms). Server akan menunggu seluruh data sebelum memproses request, sehingga menghabiskan memory dan thread.
+· Kelebihan: Efektif pada server yang mengalokasikan buffer untuk seluruh payload, sulit dibedakan dari upload biasa.
+· Kekurangan: Tidak efektif pada server dengan batas upload atau timeout pendek. Memerlukan banyak koneksi paralel untuk efek signifikan.
+· Cocok untuk: Server dengan buffer terbatas, aplikasi yang memproses upload file, atau sebagai serangan penguras memory.
+
+5. mixed – Kombinasi Acak (Belum Sempurna)
+
+· Cara kerja: Secara bergantian menggunakan normal, rapid_reset, slowloris, dan rudy dalam satu sesi, dipilih secara acak untuk setiap worker.
+· Keadaan: Saat ini belum diimplementasikan sepenuhnya di worker. Jika diaktifkan, akan berperilaku seperti normal karena mode lainnya belum diintegrasikan ke dalam satu loop. Saya sarankan menggunakan mode spesifik untuk hasil yang lebih terkendali.
+· Cocok untuk: (Setelah diimplementasikan) Serangan adaptif yang menyulitkan WAF dalam mendeteksi pola serangan tunggal.
 
 ---
+
+💡 Rekomendasi Penggunaan
+
+· Untuk stress test cepat: Gunakan normal dengan --workers 20 dan --duration 60.
+· Untuk bypass WAF/rate‑limit: Gunakan rapid_reset dengan --workers 5 – 10.
+· Untuk server dengan koneksi terbatas: Gunakan slowloris dengan --workers 3 – 5.
+· Untuk menguras memory server: Gunakan rudy dengan --workers 2 – 3.
+· Untuk hasil maksimal: Kombinasikan dengan --proxy-auto untuk rotasi IP dan hindari blokir.
+
+---
+
+Jika Anda ingin menambahkan mode baru atau memodifikasi perilaku, sesuaikan kode di bagian WORKER_CODE di dalam script. 🔥
 
 📝 5. CONTOH PENGGUNAAN LENGKAP
 
