@@ -1,20 +1,5 @@
 #!/usr/bin/env node
-/**
- * =====================================================================
- *                         🔱 0711 – ULTIMATE EDITION 🔱
- *                     Fully Interactive + CLI Mode
- *   HTTP/2 Rapid Reset, Slowloris, RUDY, Proxy Rotation, Dashboard
- *   FIXED: Worker code using array.join to avoid invalid characters
- * =====================================================================
- * 
- * USAGE:
- *   node 0711.js                     # Interactive mode
- *   node 0711.js --target example.com --workers 10 --duration 30
- *   node 0711.js --config config.json
- * 
- * ⚠️  WARNING: Use only on systems you own or have explicit permission.
- * =====================================================================
- */
+
 
 // ===== Impor Modul =====
 const { Worker, isMainThread, parentPort, workerData } = require('worker_threads');
@@ -1301,7 +1286,7 @@ async function main() {
             logger.success(`Report saved to ${filename}`);
             console.log('\n\x1b[36m══════════════════════════════════════════════════\x1b[0m');
             console.log('\x1b[36m╔══════════════════════════════════════════════════╗');
-            console.log('\x1b[36m║              ATTACK FINISHED                    ║');
+            console.log('\x1b[36m║              ATTACK FINISHED                     ║');
             console.log('\x1b[36m╚══════════════════════════════════════════════════╝');
             console.log(`Target(s)       : ${this.config.targets.join(', ')}`);
             console.log(`Attack Mode     : ${this.config.attackMode}`);
